@@ -1,0 +1,87 @@
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+import json
+
+st.set_page_config(page_title="Texas Urban Opportunity Index", layout="wide")
+st.title("Texas Urban Opportunity Index (UOI) by County")
+
+# Load data
+df = pd.read_csv("texas_counties_uoi.csv")
+
+with open("geojson-counties-fips.json") as f:
+    counties = json.load(f)
+
+# Only keep TX counties in the GeoJSON (FIPS starts with 48)
+counties["features"] = [
+    feat for feat in counties["features"] if feat["properties"]["STATE"] == "48"
+]
+
+# Add FIPS code for matching (5 digit)
+def fips_lookup(county_name):
+    for feat in counties["features"]:
+        if feat["properties"]["NAME"].upper() == county_name.upper():
+            return feat["properties"]["GEOID"]
+    return None
+
+df["fips"] = df["County"].apply(fips_lookup)
+
+st.markdown("### UOI Choropleth Map (Click counties!)")
+fig = px.choropleth_mapbox(
+    df, geojson=counties, locations="fips", color="UOI",
+    color_continuous_scale="Viridis", range_color=(df['UOI'].min(), df['UOI'].max()),
+    mapbox_style="carto-positron",
+    zoom=5.5, center={"lat": 31.0, "lon": -99.0},
+    opacity=0.7,
+    hover_name="County",
+    hover_data={"UOI":True, "Voter_Turnout":True, "fips":False}
+)
+fig.update_layout(margin={"r":0,"t":0,"l":0,"b":0})
+st.plotly_chart(fig, use_container_width=True)
+
+st.markdown("#### Data Table")
+st.dataframe(df[["County","UOI","Voter_Turnout"]])
+
+import streamlit as st
+# Texas FIPS codes start with '48'; load GeoJSON and filter for TX counties
+with open("geojson-counties-fips.json") as f:
+    counties = json.load(f)
+texas_county_fips = [feature for feature in counties["features"] if feature["properties"]["STATE"] == "48"]
+counties["features"] = texas_county_fips
+
+# Merge FIPS codes into your dataframe
+def fips_lookup(county_name):
+    # Map county names to FIPS (remove " County" and make upper for match)
+    for feat in counties["features"]:
+        name = feat["properties"]["NAME"].upper()
+        if name == county_name.upper():
+            return feat["properties"]["GEOID"]
+    return None
+
+df["fips"] = df["County"].apply(fips_lookup)
+
+# Drop missing FIPS rows
+df = df.dropna(subset=["fips"])
+
+# Main map plot
+fig = px.choropleth(
+    df,
+    geojson=counties,
+    locations="fips",
+    color="UOI",
+    color_continuous_scale="YlGnBu",
+    range_color=(df["UOI"].min(), df["UOI"].max()),
+    scope="usa",
+    labels={"UOI": "Urban Opportunity Index"},
+    hover_data=["County", "UOI", "Voter_Turnout"]
+)
+
+fig.update_geos(fitbounds="locations", visible=False)
+fig.update_layout(margin={"r":0,"t":0,"l":0,"b":0})
+
+st.plotly_chart(fig, use_container_width=True)
+
+# Clickable info (rudimentary; Plotly doesn't have built-in selection in Streamlit)
+st.markdown("""
+**Instructions:** Hover over a county to see its Urban Opportunity Index and Voter Turnout.
+""")
