@@ -10,8 +10,8 @@ st.set_page_config(
 )
 st.title("🔍 Texas Urban Opportunity Index (UOI) Explorer")
 
-# ─── load your data & geojson ────────────────────────────────────────
-# ensure your CSV has a 3-digit county FIPS column named 'fips'
+# ─── loour data & geojson ────────────────────────────────────────
+# ensure CSV has a 3-digit county FIPS column named 'fips'
 df = pd.read_csv("texas_counties_full.csv", dtype={"fips": str})
 
 # prefix "48" (Texas) onto every county FIPS, zero-pad to 5 chars
@@ -26,7 +26,7 @@ counties["features"] = [
     if feat["properties"]["STATE"] == "48"
 ]
 
-# Optionally assign feature.id so px knows to match on `locations="fips"`
+# assign feature.id so px knows to match on `locations="fips"`
 for feat in counties["features"]:
     feat["id"] = feat["properties"]["GEO_ID"] if "GEO_ID" in feat["properties"] else feat["properties"]["GEOID"]
 
@@ -40,8 +40,8 @@ raw = [
 for var in raw:
     zcol = f"Z_{var}"
     vals = df[var]
-    if var == "No_Health_Insurance_Pct":
-        # invert: lower uninsured = positive opportunity
+    if var == "No_Health_Insurance_Pct" or var == "No_Vehicle_Pct":
+        # invert: lower uninsured or lower no vehicle= positive opportunity
         df[zcol] = - (vals - vals.mean()) / vals.std()
     else:
         df[zcol] =       (vals - vals.mean()) / vals.std()
