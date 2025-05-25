@@ -1,25 +1,31 @@
+import os
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 import json
+import requests
 
-st.set_page_config(layout="wide")
-st.title("Texas Urban Opportunity Index (UOI) by County")
+# ---- PAGE CONFIG ----
+st.set_page_config(
+    page_title="Texas UOI Dashboard",
+    page_icon="🌟",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# Load up the main CSV
-df = pd.read_csv("texas_counties_full.csv")
+# ---- LOAD DATA ----
+DATA_CSV = "./src/texas_counties_full.csv"
+GEOJSON_F = "./src/geojson-counties-fips.json"
 
-# Load the GeoJSON with all US counties (just filter TX below)
-with open("geojson-counties-fips.json") as f:
-    counties = json.load(f)
+# ---- LOAD DATA ----
+df = pd.read_csv("./src/texas_counties_full.csv")
 
-# Only want Texas counties (state FIPS = 48)
-counties["features"] = [
-    feat for feat in counties["features"]
-    if feat["properties"]["STATE"] == "48"
-]
+# Fetch official FIPS-based US counties GeoJSON
+counties = requests.get(
+    "https://raw.githubusercontent.com/plotly/datasets/master/geojson-counties-fips.json"
+).json()
 
-# If 'fips' not in CSV for some reason, try to match county names to FIPS from geojson
+# ---- FIPS COLUMN CHECK ----
 if "fips" not in df.columns:
     def fips_lookup(county_name):
         name = county_name.strip().upper()
@@ -28,122 +34,210 @@ if "fips" not in df.columns:
                 return feat["id"]
         return None
     df["fips"] = df["County"].apply(fips_lookup)
+df["fips"] = df["fips"].astype(str).str.zfill(5)
+# Ensure full 5-digit Texas FIPS codes by prefixing '48'
+df["fips"] = df["fips"].apply(lambda x: x if x.startswith("48") else "48" + x[-3:])
 
-# Sidebar stuff — lets you set how much weight each variable has in the index
+# ---- UOI WEIGHTS SIDEBAR ----
 st.sidebar.header("⚙️ UOI Weights")
-preset = st.sidebar.selectbox("Choose preset…",
-    ["Even", "Income-heavy", "Education-heavy", "Custom"]
-)
+preset = st.sidebar.selectbox("Choose preset…", ["Even", "Income-heavy", "Education-heavy", "Custom"])
 
-# Set the weights for each factor based on user pick
 if preset == "Even":
     w_inc, w_bach, w_auto, w_health, w_rent, w_bb = [1/6]*6
 elif preset == "Income-heavy":
     w_inc, w_bach, w_auto, w_health, w_rent, w_bb = 0.4, 0.1, 0.1, 0.1, 0.15, 0.15
 elif preset == "Education-heavy":
     w_inc, w_bach, w_auto, w_health, w_rent, w_bb = 0.1, 0.4, 0.1, 0.1, 0.15, 0.15
-else:
-    w_inc    = st.sidebar.slider("Income",      0.0, 1.0, 1/6)
-    w_bach   = st.sidebar.slider("Bachelor’s %", 0.0, 1.0, 1/6)
-    w_auto   = st.sidebar.slider("No-Vehicle %", 0.0, 1.0, 1/6)
-    w_health = st.sidebar.slider("Uninsured %",  0.0, 1.0, 1/6)
-    w_rent   = st.sidebar.slider("Median Rent",  0.0, 1.0, 1/6)
-    w_bb     = st.sidebar.slider("Broadband %",  0.0, 1.0, 1/6)
+else:  # Custom
+    w_inc    = st.sidebar.slider("Income weight",            0.0, 1.0, 1/6)
+    w_bach   = st.sidebar.slider("Bachelor’s % weight",      0.0, 1.0, 1/6)
+    w_auto   = st.sidebar.slider("No Vehicle % weight",      0.0, 1.0, 1/6)
+    w_health = st.sidebar.slider("Uninsured % weight",       0.0, 1.0, 1/6)
+    w_rent   = st.sidebar.slider("Median Rent weight",       0.0, 1.0, 1/6)
+    w_bb     = st.sidebar.slider("Broadband % weight",       0.0, 1.0, 1/6)
 
-# Normalize so the weights add up to 1
+# Normalize weights so they sum to 1
 _total = w_inc + w_bach + w_auto + w_health + w_rent + w_bb
 w_inc, w_bach, w_auto, w_health, w_rent, w_bb = (
-    w_inc/_total, w_bach/_total, w_auto/_total, w_health/_total, w_rent/_total, w_bb/_total
+    w_inc/_total, w_bach/_total, w_auto/_total,
+    w_health/_total, w_rent/_total, w_bb/_total
 )
 st.sidebar.markdown(
-    f"**Normalized:** Income {w_inc:.2f}, Edu {w_bach:.2f}, "
-    f"Auto {w_auto:.2f}, Health {w_health:.2f}, Rent {w_rent:.2f}, Broadband {w_bb:.2f}"
+    "**Normalized weights:**  " +
+    f"Income {w_inc:.2f},  " +
+    f"Edu {w_bach:.2f},  " +
+    f"No Vehicle {w_auto:.2f},  " +
+    f"Health {w_health:.2f},  " +
+    f"Rent {w_rent:.2f},  " +
+    f"Broadband {w_bb:.2f}"
 )
-
-# Add Z-score columns if missing (just in case)
-for col in ["Median_Household_Income", "Bachelors_Degree_Pct", "No_Vehicle_Pct", "No_Health_Insurance_Pct", "Median_Gross_Rent", "Broadband_Pct"]:
+# ---- ENSURE UOI_CUSTOM EXISTS ----
+# Create Z-score columns if missing
+for col in [
+    "Median_Household_Income",
+    "Bachelors_Degree_Pct",
+    "No_Vehicle_Pct",
+    "No_Health_Insurance_Pct",
+    "Median_Gross_Rent",
+    "Broadband_Pct"
+]:
     zcol = "Z_" + col
-    if zcol not in df.columns and col in df.columns:
-        if col == "No_Health_Insurance_Pct":  # Lower uninsured = better
+    if col in df.columns and zcol not in df.columns:
+        if col in ["No_Vehicle_Pct", "No_Health_Insurance_Pct", "Median_Gross_Rent"]:
             df[zcol] = -(df[col] - df[col].mean()) / df[col].std()
-        elif col == "No_Vehicle_Pct":         # Lower = better (more cars)
-            df[zcol] = -(df[col] - df[col].mean()) / df[col].std()
-        elif col == "Median_Gross_Rent":      # Lower rent = better
-            df[zcol] = -(df[col] - df[col].mean()) / df[col].std()
-        else:                                 # Higher is better for these
+        else:
             df[zcol] = (df[col] - df[col].mean()) / df[col].std()
 
-# Calculate the UOI using all six factors and the weights from above
-df["UOI_custom"] = (
-      df["Z_Median_Household_Income"] * w_inc
-    + df["Z_Bachelors_Degree_Pct"]    * w_bach
-    + df["Z_No_Vehicle_Pct"]          * w_auto
-    + df["Z_No_Health_Insurance_Pct"] * w_health
-    + df["Z_Median_Gross_Rent"]       * w_rent
-    + df["Z_Broadband_Pct"]           * w_bb
-)
+# Compute UOI_custom on the fly if missing
+if "UOI_custom" not in df.columns:
+    df["UOI_custom"] = (
+        df["Z_Median_Household_Income"] * w_inc
+      + df["Z_Bachelors_Degree_Pct"]    * w_bach
+      + df["Z_No_Vehicle_Pct"]          * w_auto
+      + df["Z_No_Health_Insurance_Pct"] * w_health
+      + df["Z_Median_Gross_Rent"]       * w_rent
+      + df["Z_Broadband_Pct"]           * w_bb
+    )
 
-# 2) Load the US counties GeoJSON
-with open("geojson-counties-fips.json") as f:
-    counties = json.load(f)
+# ---- MAP ----
+st.title("Texas Urban Opportunity Index (UOI) by County")
 
-# 3) Keep Texas only (state FIPS = "48")
-counties["features"] = [
-    feat for feat in counties["features"]
-    if feat["properties"]["STATE"] == "48"
-]
+# Ensure FIPS is string and padded
+df["fips"] = df["fips"].astype(str).str.zfill(5)
 
-# 4) Compute df["fips"] by matching your 'County' names to each feature's id
-def fips_lookup(county_name):
-    name = county_name.strip().upper()
-    for feat in counties["features"]:
-        if feat["properties"]["NAME"].upper() == name:
-            return feat["id"]
-    return None
-
-df["fips"] = df["County"].apply(fips_lookup)
-
-# 5) Plot the choropleth map
+# Plot the choropleth
 fig = px.choropleth(
     df,
     geojson=counties,
     locations="fips",
+    featureidkey="id",
     color="UOI_custom",
     hover_name="County",
-    color_continuous_scale="Viridis",
-    scope="usa",
-    labels={"UOI": "Urban Opportunity Index"},
+    color_continuous_scale=px.colors.sequential.Viridis,
+    color_continuous_midpoint=df["UOI_custom"].mean(),
+    scope="usa",               # ensures map focuses on USA
+    labels={"UOI_custom": "Urban Opportunity Index"},
     title="Texas Urban Opportunity Index by County",
 )
 fig.update_geos(fitbounds="locations", visible=False)
+fig.update_layout(margin=dict(l=0, r=0, t=40, b=0), height=520)
 st.plotly_chart(fig, use_container_width=True)
-# County details dropdown — show the actual numbers for the selected county
-selected = st.selectbox("Highlight a county:", df["County"].sort_values())
-if selected:
-    st.write(df[df["County"] == selected][[
-        "County",
-        "UOI_custom",
-        "Median_Household_Income",
-        "Bachelors_Degree_Pct",
-        "No_Vehicle_Pct",
-        "No_Health_Insurance_Pct",
-        "Median_Gross_Rent",
-        "Broadband_Pct",
-        "Voter_Turnout"
-    ]].rename(columns={
-        "UOI_custom":"UOI (custom)"
-    }))
 
-# Raw table — if you want to see everything at once, expand this
+
+# ---- COUNTY DETAILS SELECTOR ----
+st.header("📋 Select a County for Details")
+county_choice = st.selectbox("Choose a county:", df["County"].sort_values())
+details = df[df["County"] == county_choice].iloc[0]
+# Convert Series to one-row DataFrame and rename columns
+details_df = details.to_frame().T.rename(columns={
+    "UOI_custom": "UOI",
+    "Median_Household_Income": "Income",
+    "Bachelors_Degree_Pct": "Bachelor's %",
+    "No_Health_Insurance_Pct": "No Insurance %",
+    "Median_Gross_Rent": "Rent",
+    "Broadband_Pct": "Broadband %",
+    "No_Vehicle_Pct": "No Vehicle %"
+})
+st.table(details_df)
+
+
+# ---- REGIONAL COMPARISON SETUP ----
+region_options = {
+    "Austin Metro": ["TRAVIS", "WILLIAMSON", "HAYS"],
+    "Dallas-Fort Worth Metro": ["DALLAS", "TARRANT", "COLLIN", "DENTON"],
+    "Houston Metro": ["HARRIS", "FORT BEND", "MONTGOMERY", "BRAZORIA", "GALVESTON"],
+    "San Antonio Metro": ["BEXAR", "COMAL", "GUADALUPE", "MEDINA", "WILSON", "ATASCOSA", "KENDALL"],
+    "Rio Grande Valley": ["CAMERON", "HIDALGO", "STARR", "WILLACY"],
+    "West Texas": ["EL PASO", "MIDLAND", "ECTOR", "LUBBOCK", "TOM GREEN"],
+}
+indicator_options = {
+    "Urban Opportunity Index": "UOI_custom",
+    "Median Household Income": "Median_Household_Income",
+    "Bachelor's Degree %": "Bachelors_Degree_Pct",
+    "No Health Insurance %": "No_Health_Insurance_Pct",
+    "Median Gross Rent": "Median_Gross_Rent",
+    "Broadband %": "Broadband_Pct",
+    "No Vehicle %": "No_Vehicle_Pct"
+}
+
+# ---- USER INPUTS ----
+st.header("🔍 Regional Indicator Comparison")
+col1, col2, col3 = st.columns([2,2,3])
+with col1:
+    region1 = st.selectbox("Region 1", list(region_options.keys()), index=0)
+with col2:
+    region2 = st.selectbox("Region 2", list(region_options.keys()), index=1)
+with col3:
+    indicator = st.selectbox("Indicator to compare", list(indicator_options.keys()), index=0)
+
+indicator_col = indicator_options[indicator]
+
+# ---- CALCULATE AVERAGES ----
+def regional_avg(counties_list, col):
+    subset = df[df["County"].isin(counties_list)]
+    return round(subset[col].mean(), 2) if not subset.empty else None
+
+comp_df = pd.DataFrame({
+    "Region": [region1, region2],
+    indicator: [
+        regional_avg(region_options[region1], indicator_col),
+        regional_avg(region_options[region2], indicator_col)
+    ]
+})
+
+# ---- INTERACTIVE BAR CHART ----
+st.subheader(f"Average {indicator} by Region")
+bar_fig = px.bar(
+    comp_df,
+    x="Region",
+    y=indicator,
+    color="Region",
+    text=indicator,
+    color_discrete_sequence=px.colors.qualitative.Pastel,
+    title=f"{indicator} Comparison"
+)
+bar_fig.update_traces(textposition='outside')
+bar_fig.update_layout(showlegend=False, yaxis_title="Average Value")
+
+
+st.plotly_chart(bar_fig, use_container_width=True)
+
+
+# ---- COUNTY-TO-COUNTY INDICATOR COMPARISON ----
+st.header("🏙️ County‑to‑County Indicator Comparison")
+col1, col2, col3 = st.columns([2,2,3])
+with col1:
+    county1 = st.selectbox("County A", df["County"].sort_values(), index=0, key="countyA")
+with col2:
+    county2 = st.selectbox("County B", df["County"].sort_values(), index=1, key="countyB")
+with col3:
+    county_indicator = st.selectbox("Indicator", list(indicator_options.keys()), index=0, key="countyIndicator")
+col = indicator_options[county_indicator]
+comp_county_df = pd.DataFrame({
+    "County": [county1, county2],
+    county_indicator: [
+        df.loc[df["County"]==county1, col].iloc[0],
+        df.loc[df["County"]==county2, col].iloc[0]
+    ]
+})
+st.subheader(f"{county_indicator} Comparison")
+county_fig = px.bar(
+    comp_county_df,
+    x="County",
+    y=county_indicator,
+    color="County",
+    text=county_indicator,
+    color_discrete_sequence=px.colors.qualitative.Vivid,
+)
+county_fig.update_traces(textposition='outside')
+county_fig.update_layout(showlegend=False, yaxis_title=f"Average {county_indicator}")
+st.plotly_chart(county_fig, use_container_width=True)
+
+
+# ---- RAW DATA TABLE ----
 with st.expander("Show raw data table"):
     st.dataframe(df[[
-        "County",
-        "UOI_custom",
-        "Median_Household_Income",
-        "Bachelors_Degree_Pct",
-        "No_Vehicle_Pct",
-        "No_Health_Insurance_Pct",
-        "Median_Gross_Rent",
-        "Broadband_Pct",
-        "Voter_Turnout"
+        "County", "UOI_custom", "Median_Household_Income",
+        "Bachelors_Degree_Pct", "No_Health_Insurance_Pct",
+        "Median_Gross_Rent", "Broadband_Pct", "No_Vehicle_Pct"
     ]])
